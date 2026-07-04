@@ -53,7 +53,7 @@ FEEDS = {
     # Malware research
     "Malwarebytes Labs": "https://www.malwarebytes.com/blog/feed/index.xml",
     "Securelist (Kaspersky)": "https://securelist.com/feed/",
-    "ESET Research": "https://www.welivesecurity.com/en/rss/feed/",
+    "ESET Research": "https://www.welivesecurity.com/en/feed/",
 
     # Cloud security
     "AWS Security Blog": "https://aws.amazon.com/blogs/security/feed/",
@@ -109,13 +109,16 @@ def fetch_recent_articles():
         try:
             feed = feedparser.parse(url)
         except Exception as e:
-            print(f"Failed to fetch {source}: {e}")
+            print(f"[FEED FAIL] {source}: exception - {e}")
             continue
 
-        if getattr(feed, "bozo", False) and not feed.entries:
-            print(f"Warning: {source} feed may be broken ({url})")
+        total_entries = len(feed.entries)
+        if total_entries == 0:
+            status = getattr(feed, "status", "unknown")
+            print(f"[FEED EMPTY] {source}: 0 entries returned (http status: {status}, url: {url})")
             continue
 
+        kept_this_source = 0
         for entry in feed.entries:
             uid = entry.get("id", entry.get("link"))
             if uid in seen_ids:
@@ -147,6 +150,11 @@ def fetch_recent_articles():
                 "summary": summary[:500],
                 "published": pub_dt,
             })
+            kept_this_source += 1
+
+        print(f"[FEED OK] {source}: {total_entries} entries fetched, {kept_this_source} kept after filtering")
+
+    print(f"\n[SUMMARY] {len(candidates)} candidate articles across all sources before dedup\n")
 
     # Sort newest first
     candidates.sort(key=lambda x: x["published"], reverse=True)
