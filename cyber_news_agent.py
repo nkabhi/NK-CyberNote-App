@@ -43,12 +43,11 @@ FEEDS = {
     "CrowdStrike Blog": "https://www.crowdstrike.com/blog/feed/",
     "SentinelOne Labs": "https://www.sentinelone.com/labs/feed/",
     "Rapid7 Blog": "https://www.rapid7.com/blog/rss/",
-    "Mandiant / Google Cloud Threat Intel": "https://cloud.google.com/blog/topics/threat-intelligence/rss/",
+    "Mandiant / Google Cloud Threat Intel": "https://cloudblog.withgoogle.com/topics/threat-intelligence/rss/",
 
     # Red team / offensive security
     "Project Zero": "https://googleprojectzero.blogspot.com/feeds/posts/default",
     "PortSwigger Research": "https://portswigger.net/research/rss",
-    "HackerOne Blog": "https://www.hackerone.com/blog.rss",
 
     # Malware research
     "Malwarebytes Labs": "https://www.malwarebytes.com/blog/feed/index.xml",
@@ -59,19 +58,20 @@ FEEDS = {
     "AWS Security Blog": "https://aws.amazon.com/blogs/security/feed/",
 
     # Ransomware / breach tracking
-    "Have I Been Pwned": "https://haveibeenpwned.com/rss",
+    "Have I Been Pwned (new breaches)": "https://feeds.feedburner.com/HaveIBeenPwnedLatestBreaches",
+    "Troy Hunt's Blog": "https://www.troyhunt.com/rss/",
     "The Record (Recorded Future News)": "https://therecord.media/feed",
 }
 
-# Broad net on purpose - the goal is coverage, not a narrow filter.
-# Set to [] to disable keyword filtering entirely and just take everything.
-KEYWORDS = [
-    "breach", "hack", "hacked", "hacking", "ransomware", "leak", "leaked",
-    "cyberattack", "cyber attack", "exploit", "vulnerability", "cve",
-    "data exposed", "stolen data", "phishing", "malware", "zero-day",
-    "compromised", "data theft", "credential", "attack", "threat actor",
-    "campaign", "backdoor", "spyware", "trojan"
-]
+# These sources are ALL dedicated cybersecurity outlets - every article on them
+# is already "cybersecurity news" by definition. A keyword filter on top of
+# that is redundant and was the main reason you were only getting 1-9 stories:
+# most real articles (CVE writeups, research posts, advisories) don't literally
+# contain the word "hack" or "breach" even though they're 100% relevant.
+# Left empty by default = take everything, ranked by recency. If you want a
+# narrower feed later (e.g. only breach/ransomware, skip general research),
+# add words back here.
+KEYWORDS = []
 
 LOOKBACK_HOURS = 26          # slightly over 24h so a daily run never has gaps
 TOP_N = 20                   # how many stories to send per digest
@@ -107,7 +107,16 @@ def fetch_recent_articles():
 
     for source, url in FEEDS.items():
         try:
-            feed = feedparser.parse(url)
+            # Some sites (e.g. CISA) block requests with no/unusual User-Agent
+            # and return 403. Fetching via requests with a normal browser UA
+            # first, then handing the raw bytes to feedparser, avoids this.
+            resp = requests.get(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"},
+                timeout=20,
+            )
+            resp.raise_for_status()
+            feed = feedparser.parse(resp.content)
         except Exception as e:
             print(f"[FEED FAIL] {source}: exception - {e}")
             continue
