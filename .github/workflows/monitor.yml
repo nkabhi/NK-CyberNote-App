@@ -1,0 +1,41 @@
+name: Cybersecurity News Monitor
+
+on:
+  schedule:
+    # Runs every 6 hours. Change the cron to adjust frequency.
+    # Cron is in UTC. Examples:
+    #   "0 */6 * * *"  -> every 6 hours
+    #   "0 */1 * * *"  -> every hour
+    #   "0 8 * * *"    -> once daily at 8am UTC
+    - cron: "0 */6 * * *"
+  workflow_dispatch: {}   # lets you trigger it manually from the Actions tab too
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the agent
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python cyber_news_agent.py
+
+      - name: Commit updated seen_articles.json
+        run: |
+          git config --global user.name "cyber-news-agent"
+          git config --global user.email "actions@github.com"
+          git add seen_articles.json || true
+          git diff --quiet && git diff --staged --quiet || git commit -m "Update seen articles [skip ci]"
+          git push || true
