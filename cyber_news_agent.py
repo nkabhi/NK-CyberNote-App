@@ -223,17 +223,31 @@ def summarize_with_gemini(items):
         "credential stuffing, malicious npm package, ransomware double-"
         "extortion, etc. If the source doesn't specify a mechanism, write "
         "'Not detailed in source'>\n"
+        "   - CVE / vulnerability: <exact CVE ID(s) and a one-clause "
+        "description of the flaw if the source mentions one (e.g. 'CVE-2026-"
+        "XXXXX - unauthenticated RCE in X'). If no CVE or specific "
+        "vulnerability is named, write 'No CVE mentioned in source'>\n"
         "   - Impact: <who/what was affected, in one short clause>\n"
-        "   - Why it matters: <one clause>\n\n"
+        "   - Why it matters: <one clause>\n"
+        "   - How to protect / respond: <2-3 concrete, actionable defensive "
+        "steps - e.g. 'patch to version X', 'apply CVE-XXXX-XXXXX fix', "
+        "'rotate exposed credentials', 'block indicator Y at the firewall/"
+        "email gateway', 'enable MFA', 'monitor for IOC Z'. Base this on "
+        "what the source recommends if stated; otherwise give standard best-"
+        "practice mitigation for that specific attack type (patching, "
+        "network segmentation, credential rotation, EDR detection rules, "
+        "user awareness, etc.) - but don't fabricate specific version "
+        "numbers or IOCs that aren't in the source.>\n\n"
         "STRICT RULES:\n"
         "- Base every fact ONLY on the details given below for that story. "
-        "NEVER invent, guess, or infer a threat actor name or technique that "
-        "isn't in the source text - if it's not there, say so explicitly "
-        "rather than fabricating one.\n"
+        "NEVER invent, guess, or fabricate a threat actor name, CVE number, "
+        "or technique that isn't in the source text - if it's not there, say "
+        "so explicitly rather than making one up. A wrong CVE number is "
+        "worse than no CVE number.\n"
         "- Do not include any URLs or links.\n"
         "- Plain text only, no markdown bold/asterisks/headers.\n"
-        "- Keep each field to one short clause - this is a scan-in-30-seconds "
-        "briefing, not an essay.\n"
+        "- Keep each field to one short clause or a tight list - this is a "
+        "scan-in-a-minute briefing, not an essay.\n"
         "- Number stories 1 through "
         f"{len(items)}, matching STORY numbers below, in the same order.\n\n"
         f"{bullet_list}"
@@ -244,7 +258,7 @@ def summarize_with_gemini(items):
             url,
             json={
                 "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"maxOutputTokens": 4096},
+                "generationConfig": {"maxOutputTokens": 8192},
             },
             timeout=45,
         )
