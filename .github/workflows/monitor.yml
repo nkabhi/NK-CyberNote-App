@@ -2,12 +2,10 @@ name: Cybersecurity News Monitor
 
 on:
   schedule:
-    # Runs every 6 hours. Change the cron to adjust frequency.
-    # Cron is in UTC. Examples:
-    #   "0 */6 * * *"  -> every 6 hours
-    #   "0 */1 * * *"  -> every hour
-    #   "0 8 * * *"    -> once daily at 8am UTC
-    - cron: "0 */6 * * *"
+    # Runs once a day at 6:00 AM UTC = 11:30 AM IST.
+    # Change the hour below if you want it earlier/later in your morning.
+    # Cron format: minute hour day month weekday (all in UTC)
+    - cron: "0 6 * * *"
   workflow_dispatch: {}   # lets you trigger it manually from the Actions tab too
 
 jobs:
