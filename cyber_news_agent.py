@@ -156,7 +156,7 @@ def fetch_recent_articles():
                 "source": source,
                 "title": title,
                 "link": entry.get("link"),
-                "summary": summary[:500],
+                "summary": summary[:1500],
                 "published": pub_dt,
             })
             kept_this_source += 1
@@ -206,26 +206,47 @@ def summarize_with_gemini(items):
         f"gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     )
 
-    bullet_list = "\n".join(
-        f"{idx}. [{i['source']}] {i['title']}: {i['summary']}"
+    bullet_list = "\n\n".join(
+        f"STORY {idx}\nSource: {i['source']}\nTitle: {i['title']}\nDetails: {i['summary']}"
         for idx, i in enumerate(items, start=1)
     )
     prompt = (
-        "You are a cybersecurity analyst preparing a daily digest for a busy "
-        f"reader. Below are up to {TOP_N} distinct news items about breaches, "
-        "hacks, ransomware, and vulnerabilities from the last 24 hours. "
-        "Write a numbered list (matching the numbers given) where each item "
-        "is ONE punchy sentence (max ~25 words) capturing what happened and "
-        "why it matters. Plain text only, no markdown formatting, no extra "
-        "commentary before or after the list:\n\n"
+        "You are a threat intelligence analyst preparing a detailed daily "
+        f"briefing. Below are {len(items)} raw cybersecurity news items from "
+        "the last 24 hours. For EACH story, write one entry in this exact "
+        "format:\n\n"
+        "N. [Headline in your own words, one line]\n"
+        "   - Threat actor: <name if the source text names one, otherwise "
+        "'Not attributed in source'>\n"
+        "   - TTPs / attack vector: <specific technique(s) mentioned - e.g. "
+        "phishing, exploited CVE-XXXX-XXXXX, supply chain compromise, "
+        "credential stuffing, malicious npm package, ransomware double-"
+        "extortion, etc. If the source doesn't specify a mechanism, write "
+        "'Not detailed in source'>\n"
+        "   - Impact: <who/what was affected, in one short clause>\n"
+        "   - Why it matters: <one clause>\n\n"
+        "STRICT RULES:\n"
+        "- Base every fact ONLY on the details given below for that story. "
+        "NEVER invent, guess, or infer a threat actor name or technique that "
+        "isn't in the source text - if it's not there, say so explicitly "
+        "rather than fabricating one.\n"
+        "- Do not include any URLs or links.\n"
+        "- Plain text only, no markdown bold/asterisks/headers.\n"
+        "- Keep each field to one short clause - this is a scan-in-30-seconds "
+        "briefing, not an essay.\n"
+        "- Number stories 1 through "
+        f"{len(items)}, matching STORY numbers below, in the same order.\n\n"
         f"{bullet_list}"
     )
 
     try:
         resp = requests.post(
             url,
-            json={"contents": [{"parts": [{"text": prompt}]}]},
-            timeout=30,
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"maxOutputTokens": 4096},
+            },
+            timeout=45,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -256,9 +277,14 @@ def send_telegram(message):
 
 
 def format_raw_digest(items):
-    lines = [f"🛡️ Top {len(items)} Cybersecurity Stories — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"]
+    lines = [
+        f"🛡️ Top {len(items)} Cybersecurity Stories — "
+        f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n",
+        "(Note: set GEMINI_API_KEY to get threat actor + TTP breakdowns per "
+        "story. Showing headlines only for now.)\n",
+    ]
     for idx, item in enumerate(items, start=1):
-        lines.append(f"{idx}. [{item['source']}] {item['title']}\n{item['link']}\n")
+        lines.append(f"{idx}. [{item['source']}] {item['title']}")
     return "\n".join(lines)
 
 
@@ -279,11 +305,7 @@ def main():
             f"🛡️ Top {len(items)} Cybersecurity Stories — "
             f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
         )
-        # Pair each numbered summary line with its source link right below it
-        link_lines = "\n".join(
-            f"{idx}. 🔗 {i['link']}" for idx, i in enumerate(items, start=1)
-        )
-        message = header + summary + "\n\n" + link_lines
+        message = header + summary
     else:
         message = format_raw_digest(items)
 
