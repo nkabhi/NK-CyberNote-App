@@ -211,7 +211,7 @@ def summarize_with_gemini(items):
         for idx, i in enumerate(items, start=1)
     )
     prompt = (
-        "You are a threat intelligence analyst preparing a detailed daily "
+        "You are a top threat intelligence analyst preparing a detailed daily "
         f"briefing. Below are {len(items)} raw cybersecurity news items from "
         "the last 24 hours. For EACH story, write one entry in this exact "
         "format:\n\n"
