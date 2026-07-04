@@ -106,19 +106,28 @@ def fetch_recent_articles():
     candidates = []
 
     for source, url in FEEDS.items():
-        try:
-            # Some sites (e.g. CISA) block requests with no/unusual User-Agent
-            # and return 403. Fetching via requests with a normal browser UA
-            # first, then handing the raw bytes to feedparser, avoids this.
-            resp = requests.get(
-                url,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"},
-                timeout=20,
-            )
-            resp.raise_for_status()
-            feed = feedparser.parse(resp.content)
-        except Exception as e:
-            print(f"[FEED FAIL] {source}: exception - {e}")
+        feed = None
+        last_error = None
+        for attempt in range(2):  # try twice before giving up on this source
+            try:
+                # Some sites (e.g. CISA) block requests with no/unusual User-Agent
+                # and return 403. Fetching via requests with a normal browser UA
+                # first, then handing the raw bytes to feedparser, avoids this.
+                resp = requests.get(
+                    url,
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"},
+                    timeout=20,
+                )
+                resp.raise_for_status()
+                feed = feedparser.parse(resp.content)
+                break
+            except Exception as e:
+                last_error = e
+                if attempt == 0:
+                    time.sleep(3)  # brief pause, then one retry
+
+        if feed is None:
+            print(f"[FEED FAIL] {source}: exception after retry - {last_error}")
             continue
 
         total_entries = len(feed.entries)
@@ -211,7 +220,7 @@ def summarize_with_gemini(items):
         for idx, i in enumerate(items, start=1)
     )
     prompt = (
-        "You are a top threat intelligence analyst preparing a detailed daily "
+        "You are a threat intelligence analyst preparing a detailed daily "
         f"briefing. Below are {len(items)} raw cybersecurity news items from "
         "the last 24 hours. For EACH story, write one entry in this exact "
         "format:\n\n"
@@ -253,22 +262,29 @@ def summarize_with_gemini(items):
         f"{bullet_list}"
     )
 
-    try:
-        resp = requests.post(
-            url,
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"maxOutputTokens": 8192},
-            },
-            timeout=45,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
-        return text
-    except Exception as e:
-        print(f"Gemini summarization failed, falling back to raw list: {e}")
-        return items
+    for attempt in range(3):
+        try:
+            resp = requests.post(
+                url,
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"maxOutputTokens": 8192},
+                },
+                timeout=45,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            text = data["candidates"][0]["content"]["parts"][0]["text"]
+            return text
+        except Exception as e:
+            wait = (attempt + 1) * 5  # 5s, 10s, 15s
+            print(f"Gemini call failed (attempt {attempt + 1}/3): {e}")
+            if attempt < 2:
+                print(f"Retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                print("Gemini summarization failed after 3 attempts, falling back to raw list.")
+                return items
 
 
 # ---------- STEP 3: DELIVER ----------
