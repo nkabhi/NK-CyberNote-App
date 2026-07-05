@@ -2,8 +2,11 @@ name: Cybersecurity News Monitor
 
 on:
   schedule:
-    # Runs daily at 2:30 AM UTC = 8:00 AM IST.
-    - cron: "30 2 * * *"
+    # Runs daily at 8:00 AM in Indian Standard Time.
+    # GitHub Actions now supports IANA timezones directly on schedule
+    # triggers, so no manual UTC conversion needed.
+    - cron: "10 8 * * *"
+      timezone: "Asia/Kolkata"
   workflow_dispatch: {}   # lets you trigger it manually from the Actions tab too
 
 jobs:
