@@ -1,4 +1,4 @@
-# Cybersecurity News Monitor — Your Free AI Agent
+# NK's Cybersecurity News Monitor
 
 Monitors global data breach / hacking news 24x7 and sends you a digest on Telegram.
 Runs entirely on free infrastructure. No credit card needed.
