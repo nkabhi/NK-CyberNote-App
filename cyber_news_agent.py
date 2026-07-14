@@ -73,6 +73,7 @@ FEEDS = {
 # add words back here.
 KEYWORDS = []
 
+MAX_PER_SOURCE = 3           # cap so one vendor's blog can't dominate the digest
 LOOKBACK_HOURS = 26          # slightly over 24h so a daily run never has gaps
 TOP_N = 20                   # how many stories to send per digest
 SEEN_FILE = "seen_articles.json"   # prevents duplicate alerts across runs
@@ -80,6 +81,8 @@ SEEN_FILE = "seen_articles.json"   # prevents duplicate alerts across runs
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")       # optional but recommended
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+WHATSAPP_PHONE = os.environ.get("WHATSAPP_PHONE")        # e.g. +91XXXXXXXXXX, optional
+WHATSAPP_APIKEY = os.environ.get("WHATSAPP_APIKEY")      # from CallMeBot, optional
 
 
 # ---------- STEP 1: FETCH ----------
@@ -177,14 +180,21 @@ def fetch_recent_articles():
     # Sort newest first
     candidates.sort(key=lambda x: x["published"], reverse=True)
 
-    # Dedup near-identical headlines across different outlets
+    # Dedup near-identical headlines across different outlets, and cap how
+    # many stories any single source can contribute (prevents one vendor's
+    # blog - which may post several product/marketing pieces a day - from
+    # crowding out real incident coverage from other outlets).
     deduped = []
     seen_titles_norm = []
+    per_source_count = {}
     for item in candidates:
         norm = normalize_title(item["title"])
         if is_duplicate(item["title"], seen_titles_norm):
             continue
+        if per_source_count.get(item["source"], 0) >= MAX_PER_SOURCE:
+            continue
         seen_titles_norm.append(norm)
+        per_source_count[item["source"]] = per_source_count.get(item["source"], 0) + 1
         deduped.append(item)
 
     top_items = deduped[:TOP_N]
@@ -222,41 +232,44 @@ def summarize_with_gemini(items):
     prompt = (
         "You are a threat intelligence analyst preparing a detailed daily "
         f"briefing. Below are {len(items)} raw cybersecurity news items from "
-        "the last 24 hours. For EACH story, write one entry in this exact "
-        "format:\n\n"
+        "the last 24 hours.\n\n"
+        "STRUCTURE YOUR RESPONSE IN TWO PARTS:\n\n"
+        "PART 1 - EXECUTIVE SUMMARY (write this first, 4-6 sentences, plain "
+        "paragraph, no bullets): summarize the overall picture across all "
+        "stories today - key themes, the most severe/urgent items, any "
+        "named threat actors or CVEs that stand out, and the general threat "
+        "landscape for the day. This is a busy reader's 30-second overview "
+        "before they scan the details below. Start this section with the "
+        "plain text label 'SUMMARY:' on its own line before the paragraph.\n\n"
+        "PART 2 - STORY DETAILS: start this section with the plain text "
+        "label 'DETAILS:' on its own line, then for EACH story, write one "
+        "entry like this:\n\n"
         "N. [Headline in your own words, one line]\n"
-        "   - Threat actor: <name if the source text names one, otherwise "
-        "'Not attributed in source'>\n"
-        "   - TTPs / attack vector: <specific technique(s) mentioned - e.g. "
-        "phishing, exploited CVE-XXXX-XXXXX, supply chain compromise, "
-        "credential stuffing, malicious npm package, ransomware double-"
-        "extortion, etc. If the source doesn't specify a mechanism, write "
-        "'Not detailed in source'>\n"
-        "   - CVE / vulnerability: <exact CVE ID(s) and a one-clause "
-        "description of the flaw if the source mentions one (e.g. 'CVE-2026-"
-        "XXXXX - unauthenticated RCE in X'). If no CVE or specific "
-        "vulnerability is named, write 'No CVE mentioned in source'>\n"
-        "   - Impact: <who/what was affected, in one short clause>\n"
-        "   - Why it matters: <one clause>\n"
-        "   - How to protect / respond: <2-3 concrete, actionable defensive "
-        "steps - e.g. 'patch to version X', 'apply CVE-XXXX-XXXXX fix', "
-        "'rotate exposed credentials', 'block indicator Y at the firewall/"
-        "email gateway', 'enable MFA', 'monitor for IOC Z'. Base this on "
-        "what the source recommends if stated; otherwise give standard best-"
-        "practice mitigation for that specific attack type (patching, "
-        "network segmentation, credential rotation, EDR detection rules, "
-        "user awareness, etc.) - but don't fabricate specific version "
-        "numbers or IOCs that aren't in the source.>\n\n"
-        "STRICT RULES:\n"
+        "   - Threat actor: <only include this line if the source names one>\n"
+        "   - TTPs / attack vector: <only include if the source specifies a "
+        "mechanism - e.g. phishing, exploited CVE-XXXX-XXXXX, supply chain "
+        "compromise, credential stuffing, ransomware double-extortion>\n"
+        "   - CVE / vulnerability: <only include if the source names an "
+        "actual CVE ID or specific named vulnerability>\n"
+        "   - Impact: <only include if the source specifies who/what was "
+        "affected>\n"
+        "   - Why it matters: <always include - one clause on significance>\n"
+        "   - How to protect / respond: <always include - 2-3 concrete "
+        "defensive steps, based on the source if it recommends any, "
+        "otherwise standard best-practice mitigation for that attack type>\n\n"
+        "CRITICAL RULE ON MISSING FIELDS: if a field's information isn't "
+        "present in the source text (e.g. no threat actor is named, no CVE "
+        "is mentioned), SKIP that entire line completely - do not write it "
+        "with 'not attributed', 'not specified', 'no CVE mentioned', or any "
+        "placeholder text. Just omit the line. 'Why it matters' and 'How to "
+        "protect / respond' should always be included since those can "
+        "always be reasoned about even without those specific facts.\n\n"
+        "OTHER STRICT RULES:\n"
         "- Base every fact ONLY on the details given below for that story. "
         "NEVER invent, guess, or fabricate a threat actor name, CVE number, "
-        "or technique that isn't in the source text - if it's not there, say "
-        "so explicitly rather than making one up. A wrong CVE number is "
-        "worse than no CVE number.\n"
+        "or technique that isn't in the source text.\n"
         "- Do not include any URLs or links.\n"
         "- Plain text only, no markdown bold/asterisks/headers.\n"
-        "- Keep each field to one short clause or a tight list - this is a "
-        "scan-in-a-minute briefing, not an essay.\n"
         "- Number stories 1 through "
         f"{len(items)}, matching STORY numbers below, in the same order.\n\n"
         f"{bullet_list}"
@@ -288,6 +301,30 @@ def summarize_with_gemini(items):
 
 
 # ---------- STEP 3: DELIVER ----------
+def send_whatsapp(message):
+    if not WHATSAPP_PHONE or not WHATSAPP_APIKEY:
+        print("WhatsApp not configured (WHATSAPP_PHONE/WHATSAPP_APIKEY missing) - skipping.")
+        return
+
+    url = "https://api.callmebot.com/whatsapp.php"
+    # CallMeBot's free WhatsApp API is intended for shorter personal alerts,
+    # so we chunk more conservatively than Telegram (which allows ~4096 chars).
+    CHUNK_SIZE = 1500
+    for i in range(0, len(message), CHUNK_SIZE):
+        chunk = message[i:i + CHUNK_SIZE]
+        try:
+            resp = requests.get(
+                url,
+                params={"phone": WHATSAPP_PHONE, "text": chunk, "apikey": WHATSAPP_APIKEY},
+                timeout=20,
+            )
+            if resp.status_code != 200:
+                print(f"WhatsApp send failed (status {resp.status_code}): {resp.text[:200]}")
+        except Exception as e:
+            print(f"WhatsApp send error: {e}")
+        time.sleep(2)  # CallMeBot rate-limits rapid consecutive messages
+
+
 def send_telegram(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram not configured. Printing digest instead:\n")
@@ -340,6 +377,7 @@ def main():
         message = format_raw_digest(items)
 
     send_telegram(message)
+    send_whatsapp(message)
 
     # mark these as seen so we don't repeat them next run
     seen.update(i["id"] for i in items)
