@@ -1,9 +1,10 @@
 """
 Cybersecurity News Monitor - AI Agent
 --------------------------------------
-Fetches latest data breach / hacking news from multiple free RSS feeds,
-uses a free LLM (Google Gemini) to summarize + prioritize, and sends
-a digest to you via Telegram.
+Fetches the latest data breach / hacking news from multiple free RSS feeds,
+groups results by source website (max 5 latest, never-seen-before stories
+per site), uses a free LLM (Google Gemini) to write a headline + summary +
+threat analysis for each, and sends the digest to you via Telegram/WhatsApp.
 
 Runs on a schedule (see .github/workflows/monitor.yml) so it behaves
 like a 24x7 "employee" without costing anything or needing your PC on.
@@ -63,20 +64,48 @@ FEEDS = {
     "The Record (Recorded Future News)": "https://therecord.media/feed",
 }
 
+# Homepage link shown next to each source's section header in the digest
+# (not per-article links - you asked for no per-story links, just the site
+# name/homepage once per section).
+SOURCE_HOMEPAGE = {
+    "The Hacker News": "https://thehackernews.com",
+    "BleepingComputer": "https://www.bleepingcomputer.com",
+    "Krebs on Security": "https://krebsonsecurity.com",
+    "Dark Reading": "https://www.darkreading.com",
+    "SecurityWeek": "https://www.securityweek.com",
+    "Help Net Security": "https://www.helpnetsecurity.com",
+    "Infosecurity Magazine": "https://www.infosecurity-magazine.com",
+    "CSO Online": "https://www.csoonline.com",
+    "CISA Advisories": "https://www.cisa.gov/cybersecurity-advisories",
+    "SANS Internet Storm Center": "https://isc.sans.edu",
+    "Exploit-DB": "https://www.exploit-db.com",
+    "Microsoft Security Blog": "https://www.microsoft.com/en-us/security/blog",
+    "Cisco Talos": "https://blog.talosintelligence.com",
+    "Palo Alto Unit 42": "https://unit42.paloaltonetworks.com",
+    "CrowdStrike Blog": "https://www.crowdstrike.com/blog",
+    "SentinelOne Labs": "https://www.sentinelone.com/labs",
+    "Rapid7 Blog": "https://www.rapid7.com/blog",
+    "Mandiant / Google Cloud Threat Intel": "https://cloud.google.com/blog/topics/threat-intelligence",
+    "Project Zero": "https://googleprojectzero.blogspot.com",
+    "PortSwigger Research": "https://portswigger.net/research",
+    "Malwarebytes Labs": "https://www.malwarebytes.com/blog",
+    "Securelist (Kaspersky)": "https://securelist.com",
+    "ESET Research": "https://www.welivesecurity.com",
+    "AWS Security Blog": "https://aws.amazon.com/blogs/security",
+    "Have I Been Pwned (new breaches)": "https://haveibeenpwned.com",
+    "Troy Hunt's Blog": "https://www.troyhunt.com",
+    "The Record (Recorded Future News)": "https://therecord.media",
+}
+
 # These sources are ALL dedicated cybersecurity outlets - every article on them
-# is already "cybersecurity news" by definition. A keyword filter on top of
-# that is redundant and was the main reason you were only getting 1-9 stories:
-# most real articles (CVE writeups, research posts, advisories) don't literally
-# contain the word "hack" or "breach" even though they're 100% relevant.
-# Left empty by default = take everything, ranked by recency. If you want a
-# narrower feed later (e.g. only breach/ransomware, skip general research),
-# add words back here.
+# is already "cybersecurity news" by definition, so no keyword filter is
+# applied (left empty = take everything, ranked by recency).
 KEYWORDS = []
 
-MAX_PER_SOURCE = 3           # cap so one vendor's blog can't dominate the digest
-LOOKBACK_HOURS = 26          # slightly over 24h so a daily run never has gaps
-TOP_N = 20                   # how many stories to send per digest
-SEEN_FILE = "seen_articles.json"   # prevents duplicate alerts across runs
+MAX_PER_SOURCE = 5            # latest unseen stories to include, per website
+MIN_PER_SOURCE = 2            # best-effort target - see note in fetch_recent_articles()
+LOOKBACK_HOURS = 30           # wider-than-24h window so borderline-recent stories aren't missed
+SEEN_FILE = "seen_articles.json"    # prevents the same story ever being sent twice, across days
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")       # optional but recommended
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -95,7 +124,7 @@ def normalize_title(title):
 
 
 def is_duplicate(title, seen_titles, threshold=0.72):
-    """Catches the same story reported by multiple outlets with different wording."""
+    """Catches the same story reported twice (rare within a single source)."""
     norm = normalize_title(title)
     for existing in seen_titles:
         if SequenceMatcher(None, norm, existing).ratio() >= threshold:
@@ -103,10 +132,33 @@ def is_duplicate(title, seen_titles, threshold=0.72):
     return False
 
 
+def load_seen():
+    if os.path.exists(SEEN_FILE):
+        with open(SEEN_FILE, "r") as f:
+            return set(json.load(f))
+    return set()
+
+
+def save_seen(seen_set):
+    # keep the file from growing forever - cap at last 2000 ids
+    # (raised from 500 since we now track up to ~26 sources x 5/day)
+    trimmed = list(seen_set)[-2000:]
+    with open(SEEN_FILE, "w") as f:
+        json.dump(trimmed, f)
+
+
 def fetch_recent_articles():
+    """
+    Returns an ORDERED dict: {source_name: [item, item, ...]}
+    - Only sources with at least 1 new (never-before-sent) story are included.
+    - Each source's list is newest-first, capped at MAX_PER_SOURCE.
+    - Stories already sent on a previous day (tracked in seen_articles.json)
+      are permanently excluded - "if you already sent that news, don't send
+      it again" applies to every source below, forever.
+    """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
     seen_ids = load_seen()
-    candidates = []
+    grouped = {}   # source -> list of items, preserves FEEDS order
 
     for source, url in FEEDS.items():
         feed = None
@@ -139,14 +191,12 @@ def fetch_recent_articles():
             print(f"[FEED EMPTY] {source}: 0 entries returned (http status: {status}, url: {url})")
             continue
 
-        kept_this_source = 0
+        source_candidates = []
         for entry in feed.entries:
             uid = entry.get("id", entry.get("link"))
             if uid in seen_ids:
-                continue
+                continue  # already sent this one on a previous day - skip forever
 
-            # Prefer published date; fall back to updated; if neither, keep it
-            # rather than silently dropping it (better to over-include).
             published = entry.get("published_parsed") or entry.get("updated_parsed")
             if published:
                 pub_dt = datetime(*published[:6], tzinfo=timezone.utc)
@@ -163,7 +213,7 @@ def fetch_recent_articles():
             if not relevant:
                 continue
 
-            candidates.append({
+            source_candidates.append({
                 "id": uid,
                 "source": source,
                 "title": title,
@@ -171,108 +221,78 @@ def fetch_recent_articles():
                 "summary": summary[:1500],
                 "published": pub_dt,
             })
-            kept_this_source += 1
 
-        print(f"[FEED OK] {source}: {total_entries} entries fetched, {kept_this_source} kept after filtering")
+        # newest first, dedup near-identical titles within this source, cap at MAX_PER_SOURCE
+        source_candidates.sort(key=lambda x: x["published"], reverse=True)
+        deduped = []
+        seen_titles_norm = []
+        for item in source_candidates:
+            if is_duplicate(item["title"], seen_titles_norm):
+                continue
+            seen_titles_norm.append(normalize_title(item["title"]))
+            deduped.append(item)
+            if len(deduped) >= MAX_PER_SOURCE:
+                break
 
-    print(f"\n[SUMMARY] {len(candidates)} candidate articles across all sources before dedup\n")
+        print(f"[FEED OK] {source}: {total_entries} entries fetched, {len(deduped)} new stories selected")
+        if 0 < len(deduped) < MIN_PER_SOURCE:
+            print(f"  Note: {source} only has {len(deduped)} new story right now (target min is {MIN_PER_SOURCE}) - sending anyway rather than risk losing it.")
 
-    # Sort newest first
-    candidates.sort(key=lambda x: x["published"], reverse=True)
+        if deduped:
+            grouped[source] = deduped
 
-    # Dedup near-identical headlines across different outlets, and cap how
-    # many stories any single source can contribute (prevents one vendor's
-    # blog - which may post several product/marketing pieces a day - from
-    # crowding out real incident coverage from other outlets).
-    deduped = []
-    seen_titles_norm = []
-    per_source_count = {}
-    for item in candidates:
-        norm = normalize_title(item["title"])
-        if is_duplicate(item["title"], seen_titles_norm):
-            continue
-        if per_source_count.get(item["source"], 0) >= MAX_PER_SOURCE:
-            continue
-        seen_titles_norm.append(norm)
-        per_source_count[item["source"]] = per_source_count.get(item["source"], 0) + 1
-        deduped.append(item)
+    total = sum(len(v) for v in grouped.values())
+    print(f"\n[SUMMARY] {total} total new stories across {len(grouped)} sources with activity\n")
+    print("[FINAL DIGEST BREAKDOWN]")
+    for src, items in grouped.items():
+        capped_note = " (hit MAX_PER_SOURCE cap - more may exist)" if len(items) >= MAX_PER_SOURCE else ""
+        print(f"  {src}: {len(items)} stories{capped_note}")
 
-    top_items = deduped[:TOP_N]
-    return top_items, seen_ids
-
-
-def load_seen():
-    if os.path.exists(SEEN_FILE):
-        with open(SEEN_FILE, "r") as f:
-            return set(json.load(f))
-    return set()
-
-
-def save_seen(seen_set):
-    # keep the file from growing forever - cap at last 500 ids
-    trimmed = list(seen_set)[-500:]
-    with open(SEEN_FILE, "w") as f:
-        json.dump(trimmed, f)
+    return grouped, seen_ids
 
 
 # ---------- STEP 2: SUMMARIZE (optional, free Gemini tier) ----------
-def summarize_with_gemini(items):
-    if not GEMINI_API_KEY or not items:
-        return items  # skip AI step if no key set, just pass through raw items
+def summarize_source(source, items):
+    """
+    Takes ONE source's list of items and returns plain-text numbered
+    headline + summary for just that source (no threat actor/CVE/TTP/
+    impact/mitigation fields - just what happened, in plain language).
+    Returns None if Gemini isn't configured or the call fails (caller
+    falls back to raw headlines for this source instead).
+    """
+    if not GEMINI_API_KEY:
+        return None
 
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     )
 
-    bullet_list = "\n\n".join(
-        f"STORY {idx}\nSource: {i['source']}\nTitle: {i['title']}\nDetails: {i['summary']}"
-        for idx, i in enumerate(items, start=1)
+    story_lines = "\n\n".join(
+        f"STORY {idx}\nTitle: {item['title']}\n"
+        f"Published: {item['published'].strftime('%d %b %Y, %H:%M UTC')}\n"
+        f"Details: {item['summary']}"
+        for idx, item in enumerate(items, start=1)
     )
+
     prompt = (
-        "You are a threat intelligence analyst preparing a detailed daily "
-        f"briefing. Below are {len(items)} raw cybersecurity news items from "
-        "the last 24 hours.\n\n"
-        "STRUCTURE YOUR RESPONSE IN TWO PARTS:\n\n"
-        "PART 1 - EXECUTIVE SUMMARY (write this first, 4-6 sentences, plain "
-        "paragraph, no bullets): summarize the overall picture across all "
-        "stories today - key themes, the most severe/urgent items, any "
-        "named threat actors or CVEs that stand out, and the general threat "
-        "landscape for the day. This is a busy reader's 30-second overview "
-        "before they scan the details below. Start this section with the "
-        "plain text label 'SUMMARY:' on its own line before the paragraph.\n\n"
-        "PART 2 - STORY DETAILS: start this section with the plain text "
-        "label 'DETAILS:' on its own line, then for EACH story, write one "
-        "entry like this:\n\n"
-        "N. [Headline in your own words, one line]\n"
-        "   - Threat actor: <only include this line if the source names one>\n"
-        "   - TTPs / attack vector: <only include if the source specifies a "
-        "mechanism - e.g. phishing, exploited CVE-XXXX-XXXXX, supply chain "
-        "compromise, credential stuffing, ransomware double-extortion>\n"
-        "   - CVE / vulnerability: <only include if the source names an "
-        "actual CVE ID or specific named vulnerability>\n"
-        "   - Impact: <only include if the source specifies who/what was "
-        "affected>\n"
-        "   - Why it matters: <always include - one clause on significance>\n"
-        "   - How to protect / respond: <always include - 2-3 concrete "
-        "defensive steps, based on the source if it recommends any, "
-        "otherwise standard best-practice mitigation for that attack type>\n\n"
-        "CRITICAL RULE ON MISSING FIELDS: if a field's information isn't "
-        "present in the source text (e.g. no threat actor is named, no CVE "
-        "is mentioned), SKIP that entire line completely - do not write it "
-        "with 'not attributed', 'not specified', 'no CVE mentioned', or any "
-        "placeholder text. Just omit the line. 'Why it matters' and 'How to "
-        "protect / respond' should always be included since those can "
-        "always be reasoned about even without those specific facts.\n\n"
-        "OTHER STRICT RULES:\n"
+        "You are summarizing cybersecurity news from a single source for a "
+        "quick daily briefing. Below are "
+        f"{len(items)} raw news items. For EACH one, write:\n\n"
+        "N. [Headline in your own words, one line, no markdown]\n"
+        "   Date: <copy the exact 'Published' value given below for this "
+        "story - do not compute, guess, or reformat it, just copy it "
+        "verbatim>\n"
+        "   Summary: <2-3 plain-language sentences covering what happened, "
+        "who/what was involved, and why it's notable>\n\n"
+        "STRICT RULES:\n"
         "- Base every fact ONLY on the details given below for that story. "
-        "NEVER invent, guess, or fabricate a threat actor name, CVE number, "
-        "or technique that isn't in the source text.\n"
+        "Never invent or guess facts not present in the source text.\n"
         "- Do not include any URLs or links.\n"
         "- Plain text only, no markdown bold/asterisks/headers.\n"
         "- Number stories 1 through "
         f"{len(items)}, matching STORY numbers below, in the same order.\n\n"
-        f"{bullet_list}"
+        f"{story_lines}"
     )
 
     for attempt in range(3):
@@ -281,7 +301,7 @@ def summarize_with_gemini(items):
                 url,
                 json={
                     "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"maxOutputTokens": 8192},
+                    "generationConfig": {"maxOutputTokens": 2048},
                 },
                 timeout=45,
             )
@@ -290,14 +310,30 @@ def summarize_with_gemini(items):
             text = data["candidates"][0]["content"]["parts"][0]["text"]
             return text
         except Exception as e:
-            wait = (attempt + 1) * 5  # 5s, 10s, 15s
-            print(f"Gemini call failed (attempt {attempt + 1}/3): {e}")
+            wait = (attempt + 1) * 5
+            print(f"  Gemini call failed for {source} (attempt {attempt + 1}/3): {e}")
             if attempt < 2:
-                print(f"Retrying in {wait}s...")
                 time.sleep(wait)
             else:
-                print("Gemini summarization failed after 3 attempts, falling back to raw list.")
-                return items
+                print(f"  Falling back to raw headlines for {source}.")
+                return None
+
+
+def format_raw_source(items):
+    """Fallback (no Gemini) - just numbered headlines + dates for one source."""
+    lines = []
+    for idx, item in enumerate(items, start=1):
+        date_str = item["published"].strftime("%d %b %Y, %H:%M UTC")
+        lines.append(f"{idx}. [{date_str}] {item['title']}")
+    return "\n".join(lines)
+
+
+def escape_markdown(text):
+    """Escape Telegram legacy-Markdown special characters in dynamic text so
+    a stray * _ ` [ in a headline/summary can't break message formatting."""
+    for ch in ["_", "*", "`", "["]:
+        text = text.replace(ch, "\\" + ch)
+    return text
 
 
 # ---------- STEP 3: DELIVER ----------
@@ -325,7 +361,79 @@ def send_whatsapp(message):
         time.sleep(2)  # CallMeBot rate-limits rapid consecutive messages
 
 
-def send_telegram(message):
+def build_html_digest(source_blocks):
+    """
+    source_blocks: list of dicts, each {source, homepage, count, body}
+    Builds one self-contained HTML page covering the whole day's digest,
+    grouped by website, styled simply and readably.
+    """
+    now_str = datetime.now(timezone.utc).strftime('%d %b %Y, %H:%M UTC')
+
+    sections_html = ""
+    for block in source_blocks:
+        # Turn the plain-text body ("N. Headline\n   Date: ...\n   Summary: ...")
+        # into simple HTML paragraphs/line breaks.
+        body_html = block["body"].replace("\n", "<br>")
+        sections_html += f"""
+        <div class="source-section">
+            <h2><a href="{block['homepage']}" target="_blank">{block['source']}</a>
+                <span class="count">({block['count']} stories)</span></h2>
+            <div class="stories">{body_html}</div>
+        </div>
+        """
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Cybersecurity Digest - {now_str}</title>
+<style>
+  body {{ font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+          max-width: 800px; margin: 0 auto; padding: 24px; line-height: 1.6;
+          color: #1a1a1a; background: #fafafa; }}
+  h1 {{ font-size: 22px; border-bottom: 3px solid #d32f2f; padding-bottom: 10px; }}
+  .generated {{ color: #666; font-size: 13px; margin-bottom: 30px; }}
+  .source-section {{ background: #fff; border: 1px solid #e0e0e0; border-radius: 8px;
+                      padding: 18px 22px; margin-bottom: 18px; }}
+  h2 {{ font-size: 17px; margin: 0 0 12px 0; }}
+  h2 a {{ color: #1a4b8c; text-decoration: none; }}
+  h2 a:hover {{ text-decoration: underline; }}
+  .count {{ color: #888; font-weight: normal; font-size: 13px; }}
+  .stories {{ font-size: 14px; }}
+</style>
+</head>
+<body>
+  <h1>🛡️ Cybersecurity Digest</h1>
+  <div class="generated">Generated {now_str}</div>
+  {sections_html}
+</body>
+</html>"""
+    return html
+
+
+def send_telegram_document(filepath, caption=""):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram not configured - skipping HTML file attachment.")
+        return
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+    try:
+        with open(filepath, "rb") as f:
+            resp = requests.post(
+                url,
+                data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption},
+                files={"document": (os.path.basename(filepath), f, "text/html")},
+                timeout=30,
+            )
+        if resp.status_code != 200:
+            print(f"Telegram file send failed ({resp.status_code}): {resp.text[:200]}")
+        else:
+            print("HTML digest file sent to Telegram successfully.")
+    except Exception as e:
+        print(f"Telegram file send error: {e}")
+
+
+def send_telegram(message, use_markdown=False):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram not configured. Printing digest instead:\n")
         print(message)
@@ -335,53 +443,106 @@ def send_telegram(message):
     # Telegram has a 4096 char limit per message; split if needed
     for i in range(0, len(message), 4000):
         chunk = message[i:i + 4000]
-        requests.post(url, data={
+        payload = {
             "chat_id": TELEGRAM_CHAT_ID,
             "text": chunk,
             "disable_web_page_preview": False,
-        })
+        }
+        if use_markdown:
+            payload["parse_mode"] = "Markdown"
+        resp = requests.post(url, data=payload)
+        if resp.status_code != 200 and use_markdown:
+            # Formatting broke the send (e.g. an unescaped char slipped through) -
+            # retry once as plain text so the message still gets delivered.
+            print(f"Telegram Markdown send failed ({resp.status_code}), retrying as plain text: {resp.text[:200]}")
+            payload.pop("parse_mode", None)
+            requests.post(url, data=payload)
         time.sleep(1)
 
 
-def format_raw_digest(items):
-    lines = [
-        f"🛡️ Top {len(items)} Cybersecurity Stories — "
-        f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n",
-        "(Note: set GEMINI_API_KEY to get threat actor + TTP breakdowns per "
-        "story. Showing headlines only for now.)\n",
-    ]
-    for idx, item in enumerate(items, start=1):
-        lines.append(f"{idx}. [{item['source']}] {item['title']}")
-    return "\n".join(lines)
+
 
 
 # ---------- MAIN ----------
-def main():
-    items, seen = fetch_recent_articles()
+SLEEP_BETWEEN_SOURCES_SECONDS = 10   # public repo = no Actions-minutes concern, so keep this short
 
-    if not items:
-        print("No new breach/hack news in this window.")
+def main():
+    grouped, seen = fetch_recent_articles()
+
+    if not grouped:
+        print("No new stories found on any source in this window.")
         return
 
-    print(f"Found {len(items)} new relevant, deduplicated articles.")
+    total = sum(len(v) for v in grouped.values())
+    print(f"Found {total} new stories across {len(grouped)} sources.")
+    print(
+        f"This run will send {len(grouped)} separate messages, "
+        f"{SLEEP_BETWEEN_SOURCES_SECONDS}s apart "
+        f"(~{(len(grouped) - 1) * SLEEP_BETWEEN_SOURCES_SECONDS // 60} min total runtime)."
+    )
 
-    summary = summarize_with_gemini(items)
+    source_list = list(grouped.items())
+    source_blocks_for_html = []   # collected for the combined HTML file at the end
 
-    if isinstance(summary, str):
-        header = (
-            f"🛡️ Top {len(items)} Cybersecurity Stories — "
-            f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
-        )
-        message = header + summary
-    else:
-        message = format_raw_digest(items)
+    for idx, (source, items) in enumerate(source_list):
+        homepage = SOURCE_HOMEPAGE.get(source, "")
 
-    send_telegram(message)
-    send_whatsapp(message)
+        body = summarize_source(source, items)
+        if body is None:
+            body = format_raw_source(items)
+            note = (
+                "\n(Note: set GEMINI_API_KEY for per-story summaries. "
+                "Showing headlines only for this source.)"
+            )
+        else:
+            note = ""
 
-    # mark these as seen so we don't repeat them next run
-    seen.update(i["id"] for i in items)
-    save_seen(seen)
+        # Telegram: bold the source name via Markdown, with the dynamic
+        # body escaped so a stray */_/`/[ in a headline can't break parsing.
+        bold_header_telegram = f"🛡️ *{escape_markdown(source)}* ({homepage}) — {len(items)} new stories"
+        telegram_message = f"{bold_header_telegram}\n\n{escape_markdown(body)}{escape_markdown(note)}"
+
+        # WhatsApp renders *text* as bold natively too - no escaping needed
+        # since CallMeBot just relays plain text and WhatsApp's own client
+        # handles the formatting.
+        whatsapp_message = f"🛡️ *{source}* ({homepage}) — {len(items)} new stories\n\n{body}{note}"
+
+        print(f"\nSending message {idx + 1}/{len(source_list)}: {source} ({len(items)} stories)")
+        send_telegram(telegram_message, use_markdown=True)
+        send_whatsapp(whatsapp_message)
+
+        # Save the plain body (headline+date+summary, no markdown escaping)
+        # for the combined HTML file we build after all sources are done.
+        source_blocks_for_html.append({
+            "source": source,
+            "homepage": homepage,
+            "count": len(items),
+            "body": body + note,
+        })
+
+        # Mark this source's stories as permanently seen right after sending,
+        # so a failure/timeout later in the run doesn't cause a resend of
+        # sources we already successfully delivered today.
+        seen.update(item["id"] for item in items)
+        save_seen(seen)
+
+        # Wait before the next source's message - skip the wait after the last one.
+        if idx < len(source_list) - 1:
+            print(f"Sleeping {SLEEP_BETWEEN_SOURCES_SECONDS // 60} min before next source...")
+            time.sleep(SLEEP_BETWEEN_SOURCES_SECONDS)
+
+    print("\nAll source messages sent.")
+
+    # Build and send one combined HTML page covering everything sent today -
+    # a single file you can open in a browser, no separate hosting needed.
+    html_content = build_html_digest(source_blocks_for_html)
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    html_path = f"cyber_digest_{date_str}.html"
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+    caption = f"🛡️ Full digest webpage — {total} stories across {len(grouped)} sources — {date_str}"
+    send_telegram_document(html_path, caption=caption)
 
 
 if __name__ == "__main__":
