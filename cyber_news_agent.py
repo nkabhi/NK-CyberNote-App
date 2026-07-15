@@ -364,48 +364,102 @@ def send_whatsapp(message):
 def build_html_digest(source_blocks):
     """
     source_blocks: list of dicts, each {source, homepage, count, body}
-    Builds one self-contained HTML page covering the whole day's digest,
-    grouped by website, styled simply and readably.
+    Builds one self-contained, nicely styled HTML page covering the whole
+    day's digest, grouped by website.
     """
-    now_str = datetime.now(timezone.utc).strftime('%d %b %Y, %H:%M UTC')
+    now_str = datetime.now(timezone.utc).strftime('%d %B %Y, %H:%M UTC')
+    total_stories = sum(b["count"] for b in source_blocks)
 
     sections_html = ""
     for block in source_blocks:
-        # Turn the plain-text body ("N. Headline\n   Date: ...\n   Summary: ...")
-        # into simple HTML paragraphs/line breaks.
-        body_html = block["body"].replace("\n", "<br>")
+        # Convert "N. Headline\n   Date: ...\n   Summary: ..." into styled
+        # story cards rather than a flat <br>-separated blob.
+        story_html = ""
+        raw_entries = re.split(r"\n(?=\d+\.\s)", block["body"].strip())
+        for entry in raw_entries:
+            if not entry.strip():
+                continue
+            lines = entry.strip().split("\n")
+            headline = re.sub(r"^\d+\.\s*", "", lines[0]).strip()
+            date_line = next((l.strip() for l in lines[1:] if l.strip().lower().startswith("date:")), "")
+            date_text = date_line.split(":", 1)[1].strip() if ":" in date_line else ""
+            summary_line = next((l.strip() for l in lines[1:] if l.strip().lower().startswith("summary:")), "")
+            summary_text = summary_line.split(":", 1)[1].strip() if ":" in summary_line else " ".join(lines[1:]).strip()
+
+            story_html += f"""
+            <div class="story">
+              <div class="story-headline">{headline}</div>
+              {f'<div class="story-date">{date_text}</div>' if date_text else ''}
+              <div class="story-summary">{summary_text}</div>
+            </div>
+            """
+
         sections_html += f"""
-        <div class="source-section">
-            <h2><a href="{block['homepage']}" target="_blank">{block['source']}</a>
-                <span class="count">({block['count']} stories)</span></h2>
-            <div class="stories">{body_html}</div>
-        </div>
+        <section class="source-section">
+          <div class="source-header">
+            <h2><a href="{block['homepage']}" target="_blank" rel="noopener">{block['source']}</a></h2>
+            <span class="badge">{block['count']} {'story' if block['count'] == 1 else 'stories'}</span>
+          </div>
+          {story_html}
+        </section>
         """
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Cybersecurity Digest - {now_str}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cybersecurity Digest — {now_str}</title>
 <style>
-  body {{ font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-          max-width: 800px; margin: 0 auto; padding: 24px; line-height: 1.6;
-          color: #1a1a1a; background: #fafafa; }}
-  h1 {{ font-size: 22px; border-bottom: 3px solid #d32f2f; padding-bottom: 10px; }}
-  .generated {{ color: #666; font-size: 13px; margin-bottom: 30px; }}
-  .source-section {{ background: #fff; border: 1px solid #e0e0e0; border-radius: 8px;
-                      padding: 18px 22px; margin-bottom: 18px; }}
-  h2 {{ font-size: 17px; margin: 0 0 12px 0; }}
-  h2 a {{ color: #1a4b8c; text-decoration: none; }}
-  h2 a:hover {{ text-decoration: underline; }}
-  .count {{ color: #888; font-weight: normal; font-size: 13px; }}
-  .stories {{ font-size: 14px; }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    max-width: 860px; margin: 0 auto; padding: 32px 20px 60px;
+    line-height: 1.65; color: #1c1f26; background: #f4f5f7;
+  }}
+  .masthead {{
+    background: linear-gradient(135deg, #1a1a2e 0%, #7a1f2b 100%);
+    color: #fff; border-radius: 14px; padding: 28px 30px; margin-bottom: 28px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.15);
+  }}
+  .masthead h1 {{ margin: 0 0 6px 0; font-size: 26px; letter-spacing: -0.3px; }}
+  .masthead .meta {{ font-size: 13.5px; opacity: 0.85; }}
+  .masthead .stat {{
+    display: inline-block; margin-top: 14px; background: rgba(255,255,255,0.12);
+    padding: 6px 14px; border-radius: 20px; font-size: 13px; font-weight: 600;
+  }}
+  .source-section {{
+    background: #fff; border: 1px solid #e4e6ea; border-radius: 12px;
+    padding: 22px 26px; margin-bottom: 20px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  }}
+  .source-header {{
+    display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 2px solid #f0f1f3; padding-bottom: 12px; margin-bottom: 16px;
+  }}
+  .source-header h2 {{ margin: 0; font-size: 18px; }}
+  .source-header a {{ color: #1a4b8c; text-decoration: none; }}
+  .source-header a:hover {{ text-decoration: underline; }}
+  .badge {{
+    background: #eef2ff; color: #3b4ea0; font-size: 12px; font-weight: 700;
+    padding: 4px 11px; border-radius: 14px; white-space: nowrap;
+  }}
+  .story {{ padding: 12px 0; border-bottom: 1px solid #f2f3f5; }}
+  .story:last-child {{ border-bottom: none; padding-bottom: 0; }}
+  .story-headline {{ font-size: 15.5px; font-weight: 650; color: #14161a; margin-bottom: 4px; }}
+  .story-date {{ font-size: 12px; color: #8a8f98; margin-bottom: 6px; font-weight: 500; }}
+  .story-summary {{ font-size: 14px; color: #444a54; }}
+  .footer {{ text-align: center; color: #9aa0a8; font-size: 12px; margin-top: 34px; }}
 </style>
 </head>
 <body>
-  <h1>🛡️ Cybersecurity Digest</h1>
-  <div class="generated">Generated {now_str}</div>
+  <div class="masthead">
+    <h1>🛡️ Cybersecurity Digest</h1>
+    <div class="meta">Generated {now_str}</div>
+    <div class="stat">{total_stories} new stories across {len(source_blocks)} sources</div>
+  </div>
   {sections_html}
+  <div class="footer">Built automatically · Sources link to their original site</div>
 </body>
 </html>"""
     return html
@@ -464,8 +518,6 @@ def send_telegram(message, use_markdown=False):
 
 
 # ---------- MAIN ----------
-SLEEP_BETWEEN_SOURCES_SECONDS = 10   # public repo = no Actions-minutes concern, so keep this short
-
 def main():
     grouped, seen = fetch_recent_articles()
 
@@ -474,17 +526,11 @@ def main():
         return
 
     total = sum(len(v) for v in grouped.values())
-    print(f"Found {total} new stories across {len(grouped)} sources.")
-    print(
-        f"This run will send {len(grouped)} separate messages, "
-        f"{SLEEP_BETWEEN_SOURCES_SECONDS}s apart "
-        f"(~{(len(grouped) - 1) * SLEEP_BETWEEN_SOURCES_SECONDS // 60} min total runtime)."
-    )
+    print(f"Found {total} new stories across {len(grouped)} sources. Building HTML digest (no per-site chat messages).")
 
-    source_list = list(grouped.items())
-    source_blocks_for_html = []   # collected for the combined HTML file at the end
+    source_blocks_for_html = []
 
-    for idx, (source, items) in enumerate(source_list):
+    for source, items in grouped.items():
         homepage = SOURCE_HOMEPAGE.get(source, "")
 
         body = summarize_source(source, items)
@@ -497,22 +543,7 @@ def main():
         else:
             note = ""
 
-        # Telegram: bold the source name via Markdown, with the dynamic
-        # body escaped so a stray */_/`/[ in a headline can't break parsing.
-        bold_header_telegram = f"🛡️ *{escape_markdown(source)}* ({homepage}) — {len(items)} new stories"
-        telegram_message = f"{bold_header_telegram}\n\n{escape_markdown(body)}{escape_markdown(note)}"
-
-        # WhatsApp renders *text* as bold natively too - no escaping needed
-        # since CallMeBot just relays plain text and WhatsApp's own client
-        # handles the formatting.
-        whatsapp_message = f"🛡️ *{source}* ({homepage}) — {len(items)} new stories\n\n{body}{note}"
-
-        print(f"\nSending message {idx + 1}/{len(source_list)}: {source} ({len(items)} stories)")
-        send_telegram(telegram_message, use_markdown=True)
-        send_whatsapp(whatsapp_message)
-
-        # Save the plain body (headline+date+summary, no markdown escaping)
-        # for the combined HTML file we build after all sources are done.
+        print(f"  Prepared {source}: {len(items)} stories")
         source_blocks_for_html.append({
             "source": source,
             "homepage": homepage,
@@ -520,29 +551,27 @@ def main():
             "body": body + note,
         })
 
-        # Mark this source's stories as permanently seen right after sending,
-        # so a failure/timeout later in the run doesn't cause a resend of
-        # sources we already successfully delivered today.
+        # Mark this source's stories as permanently seen right away, so a
+        # later failure doesn't cause a resend of sources already processed.
         seen.update(item["id"] for item in items)
         save_seen(seen)
 
-        # Wait before the next source's message - skip the wait after the last one.
-        if idx < len(source_list) - 1:
-            print(f"Sleeping {SLEEP_BETWEEN_SOURCES_SECONDS // 60} min before next source...")
-            time.sleep(SLEEP_BETWEEN_SOURCES_SECONDS)
+        time.sleep(2)  # small pause between Gemini calls to stay well under rate limits
 
-    print("\nAll source messages sent.")
-
-    # Build and send one combined HTML page covering everything sent today -
-    # a single file you can open in a browser, no separate hosting needed.
     html_content = build_html_digest(source_blocks_for_html)
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     html_path = f"cyber_digest_{date_str}.html"
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html_content)
 
-    caption = f"🛡️ Full digest webpage — {total} stories across {len(grouped)} sources — {date_str}"
+    caption = f"🛡️ Cybersecurity Digest — {total} new stories across {len(grouped)} sources — {date_str}"
     send_telegram_document(html_path, caption=caption)
+
+    # WhatsApp can't receive file attachments via the free CallMeBot API,
+    # so it gets a short text heads-up instead of the full page.
+    send_whatsapp(f"{caption}\nCheck Telegram for the full webpage.")
+
+    print("\nDigest complete.")
 
 
 if __name__ == "__main__":
